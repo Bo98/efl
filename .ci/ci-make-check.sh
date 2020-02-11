@@ -10,12 +10,16 @@ fi
 NUM_TRIES=5
 
 if [ "$1" = "codecov" ] ; then
-  for tries in $(seq 1 ${NUM_TRIES}); do
-    meson test -t 120 -C build --wrapper dbus-launch && break
-    cat build/meson-logs/testlog-dbus-launch.txt
-    if [ $tries != ${NUM_TRIES} ] ; then echo "tests failed, trying again!" ; fi
-      false
-  done
+#  for tries in $(seq 1 ${NUM_TRIES}); do
+#    meson test -t 120 -C build --wrapper dbus-launch && break
+#    cat build/meson-logs/testlog-dbus-launch.txt
+#    if [ $tries != ${NUM_TRIES} ] ; then echo "tests failed, trying again!" ; fi
+#      false
+#  done
+  git -C /exactness-elm-data pull
+  export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib
+  sudo ldconfig
+  EINA_LOG_LEVELS_GLOB=eina_*:0,ecore*:0,efreet*:0,eldbus:0,elementary:0 exactness -j 20 -b exactness-elm-data/default-profile -p exactness-elm-data/default-profile/ci-integration-tests.txt
   curl -s https://codecov.io/bash | bash -s -
   exit 0
 fi

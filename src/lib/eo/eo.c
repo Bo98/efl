@@ -92,6 +92,7 @@ static Eo_Id _eo_classes_alloc = 0;
 static int _efl_object_init_count = 0;
 static Efl_Object_Op _eo_ops_last_id = 0;
 static Eina_Hash *_ops_storage = NULL;
+static Eina_Hash *_ops_storage2 = NULL;
 static Eina_Spinlock _ops_storage_lock;
 
 static const Efl_Object_Optional efl_object_optional_cow_default = {};
@@ -248,6 +249,104 @@ _eo_op_class_get(Efl_Object_Op op)
      }
 
    return NULL;
+}
+
+//
+
+static unsigned short _vtable_allocated_slots = 0;
+
+static unsigned short
+_vtable_allocate_slot2(void)
+{
+   _vtable_allocated_slots ++;
+   return _vtable_allocated_slots - 1;
+}
+
+static void
+_vtable_init2(Eo_Vtable2 *vtable)
+{
+   //we assume here that _vtable_allocate_slot2 was called before
+   vtable->size = _vtable_allocated_slots;
+   vtable->chain = calloc(vtable->size, sizeof(Eo_Vtable_Node));
+}
+
+static void
+_vtable_copy_node2(Eo_Vtable_Node *dest, const Eo_Vtable_Node *src)
+{
+   dest->count = src->count;
+   dest->funcs = calloc(sizeof(op_type_funcs), src->count);
+   memcpy(dest->funcs, src->funcs, sizeof(op_type_funcs) * src->count);
+}
+
+static void
+_vtable_merge_in2(Eo_Vtable2 *dest, const Eo_Vtable2 *src)
+{
+   for (unsigned int i = 0; i < src->size; ++i)
+     {
+        //we assume that we *never* have allocated a chain when we call that here.
+        if (src->chain[i].funcs)
+          dest->chain[i] = src->chain[i];
+     }
+}
+
+#define EFL_OBJECT_OP_CLASS_PART(op) op >> 16
+#define EFL_OBJECT_OP_FUNC_PART(op) op & 0xffff
+#define EFL_OBJECT_OP_CREATE_OP_ID(class_id, func_id) ((unsigned short)class_id)<<16|((unsigned short)func_id&0xffff)
+
+static inline Eina_Bool
+_vtable_func_set2(Eo_Vtable2 *vtable, const _Efl_Class *klass,
+                 const _Efl_Class *hierarchy_klass, Efl_Object_Op op,
+                 Eo_Op_Func_Type func, Eina_Bool allow_same_override)
+{
+   unsigned short class_id = EFL_OBJECT_OP_CLASS_PART(op);
+   unsigned short func_id = EFL_OBJECT_OP_FUNC_PART(op);
+   Eo_Vtable_Node *hirachy_node = NULL;
+   Eo_Vtable_Node *node = NULL;
+   op_type_funcs *func_storage;
+
+   printf("FUNC SET %d %d\n", class_id, func_id);
+
+   EINA_SAFETY_ON_FALSE_RETURN_VAL(vtable->size >= class_id, EINA_FALSE);
+
+   if (hierarchy_klass)
+     hirachy_node = &hierarchy_klass->vtable2.chain[class_id];
+
+   node = &vtable->chain[class_id];
+
+   EINA_SAFETY_ON_NULL_RETURN_VAL(node->funcs, EINA_FALSE);
+
+   //copy the vtable then write the new func
+   if (hirachy_node && node->funcs == hirachy_node->funcs)
+     _vtable_copy_node2(node, hirachy_node);
+
+   EINA_SAFETY_ON_FALSE_RETURN_VAL(node->count >= func_id, EINA_FALSE);
+   func_storage = &node->funcs[func_id];
+
+   if (hierarchy_klass && !func)
+     {
+        if (!func)
+          {
+             op_type_funcs funcs = hirachy_node->funcs[func_id];
+             klass = funcs.src;
+             func = funcs.func;
+          }
+
+     }
+   else
+     {
+        if (!allow_same_override && (func_storage->src == klass))
+          {
+             const _Efl_Class *op_kls = _eo_op_class_get(op);
+             ERR("Class '%s': Overriding already set func %p for op %d (%s) with %p.",
+                 klass->desc->name, func_storage->func, op, op_kls->desc->name, func);
+             return EINA_FALSE;
+          }
+     }
+
+   func_storage->src = klass;
+   func_storage->func = func;
+
+   return EINA_TRUE;
 }
 
 static inline Eina_Bool
@@ -687,6 +786,20 @@ _efl_object_api_op_id_get_internal(const void *api_func)
    return op;
 }
 
+static inline Efl_Object_Op
+_efl_object_api_op_id_get_internal2(const void *api_func)
+{
+   eina_spinlock_take(&_ops_storage_lock);
+#ifndef _WIN32
+   Efl_Object_Op op = (uintptr_t) eina_hash_find(_ops_storage2, &api_func);
+#else
+   Efl_Object_Op op = (uintptr_t) eina_hash_find(_ops_storage2, api_func);
+#endif
+   eina_spinlock_release(&_ops_storage_lock);
+
+   return op;
+}
+
 /* LEGACY, should be removed before next release */
 EAPI Efl_Object_Op
 _efl_object_api_op_id_get(const void *api_func)
@@ -727,9 +840,10 @@ _efl_object_op_api_id_get(const void *api_func, const Eo *eo_obj, const char *ap
 /* klass is the klass we are working on. hierarchy_klass is the class whe should
  * use when validating. */
 static Eina_Bool
-_eo_class_funcs_set(Eo_Vtable *vtable, const Efl_Object_Ops *ops, const _Efl_Class *hierarchy_klass, const _Efl_Class *klass, Efl_Object_Op id_offset, Eina_Bool override_only)
+_eo_class_funcs_set(Eo_Vtable *vtable, Eo_Vtable2 *vtable2, const Efl_Object_Ops *ops, const _Efl_Class *hierarchy_klass, const _Efl_Class *klass, Efl_Object_Op id_offset, Eina_Bool override_only, unsigned int class_id)
 {
    unsigned int i, j;
+   unsigned int number_of_new_functions = 0;
    Efl_Object_Op op_id;
    const Efl_Op_Description *op_desc;
    const Efl_Op_Description *op_descs;
@@ -776,24 +890,36 @@ _eo_class_funcs_set(Eo_Vtable *vtable, const Efl_Object_Ops *ops, const _Efl_Cla
 
              api_funcs[i] = op_desc->api_func;
           }
+        if (_efl_object_api_op_id_get_internal(op_desc->api_func) == EFL_NOOP)
+          {
+             number_of_new_functions ++;
+          }
      }
 
-   for (i = 0, op_desc = op_descs; i < ops->count; i++, op_desc++)
+   //Before setting any real functions, allocate the node that will contain all the functions
+   printf("SETTING TO %d %d\n", class_id, number_of_new_functions);
+   vtable2->chain[class_id].count = number_of_new_functions;
+   vtable2->chain[class_id].funcs = calloc(number_of_new_functions, sizeof(Eo_Vtable_Node));
+
+   for (i = 0, j = 0, op_desc = op_descs; i < ops->count; i++, op_desc++)
      {
         Efl_Object_Op op = EFL_NOOP;
+        Efl_Object_Op op2 = EFL_NOOP;
 
         /* Get the opid for the function. */
         op = _efl_object_api_op_id_get_internal(op_desc->api_func);
+        op2 = _efl_object_api_op_id_get_internal2(op_desc->api_func);
 
         if (op == EFL_NOOP)
           {
+             //functions that do not have a op yet, are considered to be belonging to this class
              if (override_only)
                {
                   ERR("Class '%s': Tried overriding a previously undefined function.", klass->desc->name);
                   return EINA_FALSE;
                }
 
-             op = op_id;
+             op = op_id; //FIXME assemble op id correctly here
              eina_spinlock_take(&_ops_storage_lock);
 #ifndef _WIN32
              eina_hash_add(_ops_storage, &op_desc->api_func, (void *) (uintptr_t) op);
@@ -804,12 +930,25 @@ _eo_class_funcs_set(Eo_Vtable *vtable, const Efl_Object_Ops *ops, const _Efl_Cla
 
              op_id++;
           }
+        if (op2 == EFL_NOOP)
+          {
+             op2 = EFL_OBJECT_OP_CREATE_OP_ID(class_id, j);
+             eina_spinlock_take(&_ops_storage_lock);
+#ifndef _WIN32
+             eina_hash_add(_ops_storage2, &op_desc->api_func, (void *) (uintptr_t) op2);
+#else
+             eina_hash_add(_ops_storage2, op_desc->api_func, (void *) (uintptr_t) op2);
+#endif
+             eina_spinlock_release(&_ops_storage_lock);
+             j ++;
+          }
 
 #ifdef EO_DEBUG
         DBG("%p->%p '%s'", op_desc->api_func, op_desc->func, _eo_op_desc_name_get(op_desc));
 #endif
-
         if (!_vtable_func_set(vtable, klass, override_class, op, op_desc->func, EINA_TRUE))
+          return EINA_FALSE;
+        if (!_vtable_func_set2(vtable2, klass, override_class, op2, op_desc->func, EINA_TRUE))
           return EINA_FALSE;
      }
 
@@ -836,6 +975,7 @@ efl_class_functions_set(const Efl_Class *klass_id, const Efl_Object_Ops *object_
    _eo_ops_last_id += klass->ops_count + 1;
 
    _vtable_init(&klass->vtable, DICH_CHAIN1(_eo_ops_last_id) + 1);
+   _vtable_init2(&klass->vtable2);
 
    /* Flatten the function array */
      {
@@ -846,8 +986,36 @@ efl_class_functions_set(const Efl_Class *klass_id, const Efl_Object_Ops *object_
         for ( mro_itr-- ; mro_itr > klass->mro ; mro_itr--)
           _vtable_copy_all(&klass->vtable, &(*mro_itr)->vtable);
      }
+   /* Flatten the function array */
+   printf("FUNCTIONS SET %s\n", klass->desc->name);
+     {
+        if (klass->parent)
+          {
+             printf("MERGING IN %d\n", klass->parent->base_id2);
+             _vtable_merge_in2(&klass->vtable2, &klass->parent->vtable2);
+          }
+        for (int i = 0; klass->extensions[i]; i++)
+          {
+             printf("MERGING IN %d\n",klass->extensions[i]->base_id2);
+             _vtable_merge_in2(&klass->vtable2, &klass->extensions[i]->vtable2);
+          }
 
-   return _eo_class_funcs_set(&klass->vtable, object_ops, klass, klass, 0, EINA_FALSE);
+     }
+   if (klass->desc->type == EFL_CLASS_TYPE_MIXIN)
+     {
+        unsigned int i;
+
+        for (i = 0; i < object_ops->count; i++)
+          {
+             Efl_Object_Op op = _efl_object_api_op_id_get_internal2(object_ops->descs[i].api_func);
+             if (op == EFL_NOOP) continue;
+             short class_id = EFL_OBJECT_OP_CLASS_PART(op);
+             const _Efl_Class *required_klass = _eo_classes[class_id];
+             printf("MERGING IN 2 %d\n", class_id);
+             _vtable_merge_in2(&klass->vtable2, &required_klass->vtable2);
+          }
+     }
+   return _eo_class_funcs_set(&klass->vtable, &klass->vtable2, object_ops, klass, klass, 0, EINA_FALSE, klass->base_id2);
 
 err_funcs:
    ERR("Class %s already had its functions set..", klass->desc->name);
@@ -1619,6 +1787,7 @@ efl_class_new(const Efl_Class_Description *desc, const Efl_Class *parent_id, ...
    klass->extensions = (const _Efl_Class **) ((char *) klass + _eo_class_sz);
    klass->mro = (const _Efl_Class **) ((char *) klass->extensions + extn_sz);
    klass->extn_data_off = (Eo_Extension_Data_Offset *) ((char *) klass->mro + mro_sz);
+   klass->base_id2 = _vtable_allocate_slot2();
 
    if (klass->parent)
      {
@@ -1740,7 +1909,8 @@ efl_object_override(Eo *eo_id, const Efl_Object_Ops *ops)
              _vtable_copy_all(vtable, &obj->klass->vtable);
           }
 
-        if (!_eo_class_funcs_set(vtable, ops, obj->klass, klass, 0, EINA_TRUE))
+        /* FIXME */
+        if (!_eo_class_funcs_set(vtable, NULL, ops, obj->klass, klass, 0, EINA_TRUE, obj->klass->base_id2))
           {
              ERR("Failed to override functions for %s@%p. All previous "
                  "overrides have been reset.", obj->klass->desc->name, eo_id);
@@ -2357,6 +2527,11 @@ efl_object_init(void)
    _ops_storage = eina_hash_pointer_new(NULL);
 #else
    _ops_storage = eina_hash_string_superfast_new(NULL);
+#endif
+#ifndef _WIN32
+   _ops_storage2 = eina_hash_pointer_new(NULL);
+#else
+   _ops_storage2 = eina_hash_string_superfast_new(NULL);
 #endif
 
    _eo_table_data_shared = _eo_table_data_new(EFL_ID_DOMAIN_SHARED);

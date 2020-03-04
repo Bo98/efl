@@ -7,3 +7,4 @@
 #include <exactness_private.h>
 
 void ex_printf(int verbose, const char *fmt, ...);
+Eina_Bool ex_mkdir(const char *dir, Eina_Bool skip_last);

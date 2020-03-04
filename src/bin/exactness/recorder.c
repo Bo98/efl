@@ -320,26 +320,6 @@ _prg_full_path_guess(const char *prg)
    return ret;
 }
 
-static Eina_Bool
-_mkdir(const char *dir)
-{
-   if (!ecore_file_exists(dir))
-     {
-        const char *cur = dir + 1;
-        do
-          {
-             char *slash = strchr(cur, '/');
-             if (slash) *slash = '\0';
-             if (!ecore_file_exists(dir) && !ecore_file_mkdir(dir)) return EINA_FALSE;
-             if (slash) *slash = '/';
-             if (slash) cur = slash + 1;
-             else cur = NULL;
-          }
-        while (cur);
-     }
-   return EINA_TRUE;
-}
-
 static const Ecore_Getopt optdesc = {
   "exactness_record",
   "%prog [options] <-v|-t|-h> command",
@@ -427,7 +407,7 @@ int main(int argc, char **argv)
         if (slash)
           {
              *slash = '\0';
-             if (!_mkdir(_out_filename))
+             if (!ex_mkdir(_out_filename, EINA_FALSE))
                {
                   fprintf(stderr, "Can't create %s\n", _out_filename);
                   goto end;

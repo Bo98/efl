@@ -262,9 +262,12 @@ _vtable_allocate_slot2(void)
    return _vtable_allocated_slots - 1;
 }
 
+static long long allocated_memory = 0;
+
 static void
 _vtable_init2(Eo_Vtable2 *vtable)
 {
+   allocated_memory += vtable->size * sizeof(Eo_Vtable_Node);
    //we assume here that _vtable_allocate_slot2 was called before
    vtable->size = _vtable_allocated_slots;
    vtable->chain = calloc(vtable->size, sizeof(Eo_Vtable_Node));
@@ -273,6 +276,7 @@ _vtable_init2(Eo_Vtable2 *vtable)
 static void
 _vtable_copy_node2(Eo_Vtable_Node *dest, const Eo_Vtable_Node *src)
 {
+   allocated_memory += sizeof(op_type_funcs)* src->count;
    dest->count = src->count;
    dest->funcs = calloc(sizeof(op_type_funcs), src->count);
    memcpy(dest->funcs, src->funcs, sizeof(op_type_funcs) * src->count);
@@ -303,8 +307,6 @@ _vtable_func_set2(Eo_Vtable2 *vtable, const _Efl_Class *klass,
    Eo_Vtable_Node *hirachy_node = NULL;
    Eo_Vtable_Node *node = NULL;
    op_type_funcs *func_storage;
-
-   printf("FUNC SET %d %d\n", class_id, func_id);
 
    EINA_SAFETY_ON_FALSE_RETURN_VAL(vtable->size >= class_id, EINA_FALSE);
 
@@ -897,7 +899,6 @@ _eo_class_funcs_set(Eo_Vtable *vtable, Eo_Vtable2 *vtable2, const Efl_Object_Ops
      }
 
    //Before setting any real functions, allocate the node that will contain all the functions
-   printf("SETTING TO %d %d\n", class_id, number_of_new_functions);
    vtable2->chain[class_id].count = number_of_new_functions;
    vtable2->chain[class_id].funcs = calloc(number_of_new_functions, sizeof(Eo_Vtable_Node));
 
@@ -987,32 +988,32 @@ efl_class_functions_set(const Efl_Class *klass_id, const Efl_Object_Ops *object_
           _vtable_copy_all(&klass->vtable, &(*mro_itr)->vtable);
      }
    /* Flatten the function array */
-   printf("FUNCTIONS SET %s\n", klass->desc->name);
      {
         if (klass->parent)
           {
-             printf("MERGING IN %d\n", klass->parent->base_id2);
              _vtable_merge_in2(&klass->vtable2, &klass->parent->vtable2);
           }
         for (int i = 0; klass->extensions[i]; i++)
           {
-             printf("MERGING IN %d\n",klass->extensions[i]->base_id2);
              _vtable_merge_in2(&klass->vtable2, &klass->extensions[i]->vtable2);
           }
 
      }
-   if (klass->desc->type == EFL_CLASS_TYPE_MIXIN)
      {
         unsigned int i;
 
         for (i = 0; i < object_ops->count; i++)
           {
              Efl_Object_Op op = _efl_object_api_op_id_get_internal2(object_ops->descs[i].api_func);
-             if (op == EFL_NOOP) continue;
+             if (op == EFL_NOOP) continue; //EFL_NOOP means that this function is not yet defined, this will be handled later
              short class_id = EFL_OBJECT_OP_CLASS_PART(op);
-             const _Efl_Class *required_klass = _eo_classes[class_id];
-             printf("MERGING IN 2 %d\n", class_id);
-             _vtable_merge_in2(&klass->vtable2, &required_klass->vtable2);
+             if (klass->vtable2.chain[class_id].count == 0)
+               {
+                  const _Efl_Class *required_klass = _eo_classes[class_id];
+                  if (klass->desc->type != EFL_CLASS_TYPE_MIXIN)
+                    ERR("There is an API implemented, whoms type is not part of this class.");
+                  _vtable_merge_in2(&klass->vtable2, &required_klass->vtable2);
+               }
           }
      }
    return _eo_class_funcs_set(&klass->vtable, &klass->vtable2, object_ops, klass, klass, 0, EINA_FALSE, klass->base_id2);

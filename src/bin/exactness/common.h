@@ -102,4 +102,3 @@ Evas *(*_evas_new)(void);
 void ex_printf(int verbose, const char *fmt, ...);
 int ex_prg_invoke(const char *full_path, int argc, char **argv, Eina_Bool player);
 Eina_Stringshare *ex_prg_full_path_guess(const char *prg);
-Eina_Bool ex_mkdir(const char *dir, Eina_Bool skip_last);

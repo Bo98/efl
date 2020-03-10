@@ -323,7 +323,7 @@ int main(int argc, char **argv)
         if (slash)
           {
              *slash = '\0';
-             if (!ex_mkdir(_out_filename, EINA_FALSE))
+             if (!ecore_file_mkpath(_out_filename))
                {
                   fprintf(stderr, "Can't create %s\n", _out_filename);
                   goto end;
